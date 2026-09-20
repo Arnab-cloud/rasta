@@ -35,10 +35,10 @@ impl TryFrom<u8> for FrameType {
 const HEADER_SIZE: usize = 1 + 4 + 4; // type + streamID + length
 
 // Frame is a single multiplexed message.
-struct Frame {
-    frame_type: FrameType,
-    stream_id: u32,
-    payload: Box<[u8]>,
+pub struct Frame {
+    pub frame_type: FrameType,
+    pub stream_id: u32,
+    pub payload: Box<[u8]>,
 }
 
 // Framer serialises/deserialises frames on a single net.Conn.
@@ -56,7 +56,7 @@ impl Framer {
     }
 
     // WriteFrame sends a frame atomically.
-    fn write_frame(&self, frame: Frame) -> io::Result<()> {
+    pub fn write_frame(&self, frame: Frame) -> io::Result<()> {
         let mut conn = self.conn.lock().unwrap();
 
         let mut header: [u8; HEADER_SIZE] = [0; HEADER_SIZE];
