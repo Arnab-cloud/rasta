@@ -49,7 +49,7 @@ pub struct Framer {
 
 // NewFramer wraps any ReadWriter (typically a net.Conn).
 impl Framer {
-    fn new(conn: net::TcpStream) -> Framer {
+    pub fn new(conn: net::TcpStream) -> Framer {
         return Framer {
             conn: sync::Mutex::new(conn),
         };
@@ -78,7 +78,7 @@ impl Framer {
 
     // ReadFrame blocks until a full frame is available.
     // Must be called by exactly one goroutine.
-    fn read_frame(&self) -> io::Result<Frame> {
+    pub fn read_frame(&self) -> io::Result<Frame> {
         let mut header: Vec<u8> = Vec::with_capacity(HEADER_SIZE);
         let mut conn = self.conn.lock().unwrap();
         conn.read_to_end(&mut header)?;

@@ -5,7 +5,7 @@ use std::sync;
 
 // Stream is a virtual bidirectional channel inside the tunnel connection.
 // It implements io.ReadWriteCloser.
-struct Stream<'a> {
+pub struct Stream<'a> {
     id: u32,
     framer: &'a frame::Framer,
     buf: sync::Mutex<Box<[u8]>>,

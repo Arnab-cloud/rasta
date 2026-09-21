@@ -3,4 +3,8 @@ name = "rasta"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "daemon"
+path = "src/daemon/main.rs"
+
 [dependencies]
