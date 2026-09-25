@@ -1,111 +1,112 @@
-use std::{io, net};
+use std::{
+    collections::HashMap,
+    io, net,
+    sync::{self, mpsc},
+};
 
-use crate::shared::frame;
+use crate::shared::{frame, mux, stream};
+
+pub type Accept = Result<stream::ShareableStream, io::Error>;
 
 // Mux multiplexes many Streams over one Framer.
 pub struct Mux {
-    framer: frame::Framer,
-    // streams: HashMap<u32, stream::Stream<'a>>, // map[u32]*Stream
+    framer: sync::Arc<sync::Mutex<frame::Framer>>,
+    streams: HashMap<u32, stream::ShareableStream>,
 
-    // accept: mpsc::Receiver<stream::Stream<'a>>, // acceptErr chan error
-
-    // close_once: sync::Once,
-    // done: mpsc::Sender<()>,
+    accept: Option<mpsc::Sender<Accept>>,
+    close_once: sync::Once,
 }
 
 impl Mux {
-    // NewMux creates a Mux. Call Serve() in a goroutine to start reading frames.
-    pub fn new(conn: net::TcpStream) -> Mux {
+    // NewMux creates a Mux. Call serve() in a goroutine to start reading frames.
+    pub fn new(conn: net::TcpStream) -> (mux::Mux, mpsc::Receiver<Accept>) {
         let framer = frame::Framer::new(conn);
-        Mux { framer }
-        // 	return &Mux{
-        // 		framer:    framer,
-        // 		accept:    make(chan *Stream, 64),
-        // 		acceptErr: make(chan error, 1),
-        // 		done:      make(chan struct{}),
-        // 	}
+        let (accept, accept_rec) = mpsc::channel();
+        let close_once = sync::Once::new();
+        (
+            mux::Mux {
+                framer: sync::Arc::new(sync::Mutex::new(framer)),
+                streams: HashMap::new(),
+                accept: Some(accept),
+                close_once,
+            },
+            accept_rec,
+        )
     }
 
-    pub fn read_frame(&self) -> io::Result<frame::Frame> {
-        self.framer.read_frame()
+    pub fn read_frame(&mut self) -> io::Result<frame::Frame> {
+        self.framer.lock().unwrap().read_frame()
     }
 
     // Serve reads frames forever and dispatches to the right stream.
     // Blocks until the connection is closed.
-    fn serve(&self) {
-        // loop {
-        // 	fr, err := self.framer.read_frame();
-        // 	if err != nil {
-        // 		m.closeOnce.Do(fn() {
-        // 			select {
-        // 			case m.acceptErr <- err:
-        // 			default:
-        // 			}
-        // 			close(m.done)
-        // 		})
-        // 		return
-        // 	}
+    pub fn serve(&mut self) {
+        loop {
+            let fr = self.framer.lock().unwrap().read_frame();
+            if let Err(err) = fr {
+                self.close_once.call_once(|| {
+                    self.accept.as_mut().unwrap().send(Err(err)).unwrap();
+                    drop(self.accept.take());
+                });
+                return;
+            }
+            let fr = fr.unwrap();
+            match fr.frame_type {
+                frame::FrameType::FramePing => {
+                    _ = self.framer.lock().unwrap().write_frame(frame::Frame {
+                        frame_type: frame::FrameType::FramePong,
+                        stream_id: fr.stream_id,
+                        payload: Box::default(),
+                    })
+                }
+                frame::FrameType::FramePong => { /*keepalive reply — nothing to do*/ }
+                frame::FrameType::FrameData => {
+                    let s = self.get_or_create(fr.stream_id);
+                    s.lock().unwrap().ingest(fr.payload);
+                }
+                frame::FrameType::FrameEOF => self
+                    .streams
+                    .get(&fr.stream_id)
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .signal_eof(),
+                frame::FrameType::FrameReset => self
+                    .streams
+                    .remove(&fr.stream_id)
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .signal_eof(),
+            }
+        }
     }
 
-    // 		switch fr.frame_type {
-    // 		case FramePing:
-    // 			_ = m.framer.WriteFrame(Frame{frame_type: FramePong, stream_id: fr.stream_id})
+    // Returns the next inbound stream opened by the remote.
+    pub fn accept(&self, receiver: &mpsc::Receiver<Accept>) -> Accept {
+        receiver.recv().unwrap()
+    }
 
-    // 		case FramePong:
-    // 			// keepalive reply — nothing to do
+    // Creates a new outbound stream with the given ID.
+    fn open_stream(&mut self, id: u32) -> stream::ShareableStream {
+        let s = sync::Arc::new(sync::Mutex::new(stream::Stream::new(
+            id,
+            sync::Arc::clone(&self.framer),
+        )));
+        let s_copy = sync::Arc::clone(&s);
 
-    // 		case FrameData:
-    // 			s := m.getOrCreate(fr.stream_id)
-    // 			s.ingest(fr.Payload)
+        self.streams.insert(id, s).unwrap();
+        s_copy
+    }
 
-    // 		case FrameEOF:
-    // 			if s, ok := m.streams.Load(fr.stream_id); ok {
-    // 				s.(*Stream).signalEOF()
-    // 			}
-
-    // 		case FrameReset:
-    // 			if s, ok := m.streams.LoadAndDelete(fr.stream_id); ok {
-    // 				s.(*Stream).signalEOF()
-    // 			}
-    // 		}
-    // 	}
-    // }
+    fn get_or_create(&mut self, id: u32) -> stream::ShareableStream {
+        if let Some(s) = self.streams.get_mut(&id) {
+            return sync::Arc::clone(s);
+        };
+        let s = self.open_stream(id);
+        let s_copy = sync::Arc::clone(&s);
+        // notify Accept waiters that a new inbound stream arrived
+        self.accept.as_mut().unwrap().send(Ok(s)).unwrap();
+        s_copy
+    }
 }
-
-// // OpenStream creates a new outbound stream with the given ID.
-// fn (m *Mux) OpenStream(id u32) *Stream {
-// 	s := newStream(id, m.framer)
-// 	m.streams.Store(id, s)
-// 	return s
-// }
-
-// // Accept returns the next inbound stream opened by the remote.
-// fn (m *Mux) Accept() (*Stream, error) {
-// 	select {
-// 	case s := <-m.accept:
-// 		return s, nil
-// 	case err := <-m.acceptErr:
-// 		return nil, err
-// 	case <-m.done:
-// 		return nil, io.EOF
-// 	}
-// }
-
-// fn (m *Mux) getOrCreate(id u32) *Stream {
-// 	if v, ok := m.streams.Load(id); ok {
-// 		return v.(*Stream)
-// 	}
-// 	s := newStream(id, m.framer)
-// 	m.streams.Store(id, s)
-// 	// notify Accept waiters that a new inbound stream arrived
-// 	select {
-// 	case m.accept <- s:
-// 	default:
-// 	}
-// 	return s
-// }
-
-// // RemoveStream cleans up a stream from the mux table.
-// fn (m *Mux) RemoveStream(id u32) {
-// 	m.streams.Delete(id)
-// }

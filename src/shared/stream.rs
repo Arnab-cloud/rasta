@@ -3,19 +3,21 @@ use std::cmp::min;
 use std::io;
 use std::sync;
 
+pub type ShareableStream = sync::Arc<sync::Mutex<Stream>>;
+
 // Stream is a virtual bidirectional channel inside the tunnel connection.
 // It implements io.ReadWriteCloser.
-pub struct Stream<'a> {
+pub struct Stream {
     id: u32,
-    framer: &'a frame::Framer,
+    framer: sync::Arc<sync::Mutex<frame::Framer>>,
     buf: sync::Mutex<Box<[u8]>>,
     buf_cv: sync::Condvar,
     closed: sync::RwLock<bool>, // closedMu  sync.RWMutex
     remote_eof: bool,           // remote half-closed (no more data coming)
 }
 
-impl Stream<'_> {
-    fn new(id: u32, framer: &frame::Framer) -> Stream<'_> {
+impl Stream {
+    pub fn new(id: u32, framer: sync::Arc<sync::Mutex<frame::Framer>>) -> Stream {
         Stream {
             id,
             framer,
@@ -42,7 +44,7 @@ impl Stream<'_> {
             ));
         }
 
-        match self.framer.write_frame(frame::Frame {
+        match self.framer.lock().unwrap().write_frame(frame::Frame {
             frame_type: frame::FrameType::FrameData,
             stream_id: self.id,
             payload: p,
@@ -81,7 +83,7 @@ impl Stream<'_> {
 
     // CloseWrite sends EOF to the remote, signaling no more data from our side.
     fn close_write(&self) -> io::Result<()> {
-        return self.framer.write_frame(frame::Frame {
+        return self.framer.lock().unwrap().write_frame(frame::Frame {
             frame_type: frame::FrameType::FrameEOF,
             stream_id: self.id,
             payload: Box::default(),
@@ -96,7 +98,7 @@ impl Stream<'_> {
         *self.closed.write().unwrap() = true;
 
         self.buf_cv.notify_all(); // wake any blocked Read
-        self.framer.write_frame(frame::Frame {
+        self.framer.lock().unwrap().write_frame(frame::Frame {
             frame_type: frame::FrameType::FrameReset,
             stream_id: self.id,
             payload: Box::default(),
@@ -104,7 +106,7 @@ impl Stream<'_> {
     }
 
     // ingest is called by the Mux to deliver data received from the network.
-    fn ingest(&mut self, data: Box<[u8]>) {
+    pub fn ingest(&mut self, data: Box<[u8]>) {
         let mut buf = self.buf.lock().unwrap();
         let mut buf_vec = buf.clone().into_vec();
         buf_vec.append(&mut data.into_vec());
@@ -113,7 +115,7 @@ impl Stream<'_> {
     }
 
     // signalEOF marks the remote write side as done.
-    fn signal_eof(&mut self) {
+    pub fn signal_eof(&mut self) {
         let buf = self.buf.lock().unwrap();
         self.remote_eof = true;
         self.buf_cv.notify_all();
